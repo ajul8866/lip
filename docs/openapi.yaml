@@ -1,0 +1,1160 @@
+openapi: 3.1.0
+info:
+  title: LIP API
+  version: 0.1.0
+  description: |
+    LLM-driven security workflow manager. All state-changing actions are
+    audited. Active tools require a recorded approval. Safe local-only mode is
+    fail-closed and blocks non-allowlisted egress, cloud providers, and remote
+    asset imports.
+servers:
+  - url: /api/v1
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: auth
+  - name: users
+  - name: projects
+  - name: conversations
+  - name: tasks
+  - name: approvals
+  - name: findings
+  - name: assets
+  - name: llm
+  - name: settings
+  - name: audit
+  - name: dashboard
+  - name: reports
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      security: []
+      summary: Liveness
+      responses:
+        "200": { description: Process is alive }
+  /readyz:
+    get:
+      tags: [system]
+      security: []
+      summary: Readiness (database ping)
+      responses:
+        "200": { description: Ready }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /system/status:
+    get:
+      tags: [system]
+      security: []
+      summary: Public instance status
+      responses:
+        "200":
+          description: Instance status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, appName, setupRequired, safeLocalOnly, supportedLocales]
+                properties:
+                  version: { type: string }
+                  appName: { type: string }
+                  startedAt: { type: string, format: date-time }
+                  setupRequired: { type: boolean }
+                  defaultLocale: { type: string, enum: [en, ko] }
+                  supportedLocales:
+                    type: array
+                    items: { type: string, enum: [en, ko] }
+                  safeLocalOnly: { type: boolean }
+                  safeModeSource: { type: string }
+                  egressRuleCount: { type: integer }
+                  maxConcurrentTasks: { type: integer }
+                  autoRun: { type: boolean }
+  /setup/status:
+    get:
+      tags: [system]
+      security: []
+      summary: First-run status
+      responses:
+        "200":
+          description: Setup state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  setupRequired: { type: boolean }
+                  appName: { type: string }
+                  safeLocalOnly: { type: boolean }
+  /setup:
+    post:
+      tags: [system]
+      security: []
+      summary: Create the first administrator (only while no users exist)
+      parameters:
+        - in: header
+          name: X-LIP-Setup-Token
+          schema: { type: string }
+          description: Required only when LIP_SETUP_TOKEN is configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 12, maxLength: 72 }
+                displayName: { type: string, maxLength: 100 }
+                projectName: { type: string, maxLength: 120 }
+                locale: { type: string, enum: [en, ko] }
+      responses:
+        "201":
+          description: Administrator and first project created; session cookie set
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  project: { $ref: "#/components/schemas/Project" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Sign in with local credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Session cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Current user and process policy
+      responses:
+        "200":
+          description: Current session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  sessionId: { type: string }
+                  safeLocalOnly: { type: boolean }
+                  safeModeSource: { type: string }
+                  maxConcurrentTasks: { type: integer }
+                  autoRun: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [auth]
+      summary: Update own display name and/or locale
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 100 }
+                locale: { type: string, enum: [en, ko] }
+      responses:
+        "200": { description: Updated }
+        "422": { $ref: "#/components/responses/Validation" }
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session
+      responses:
+        "204": { description: Logged out }
+  /auth/change-password:
+    post:
+      tags: [auth]
+      summary: Change own password and revoke other sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string, minLength: 12, maxLength: 72 }
+      responses:
+        "204": { description: Password changed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /sessions:
+    get:
+      tags: [auth]
+      summary: List own active sessions
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+                  currentSessionId: { type: string }
+  /sessions/{id}:
+    delete:
+      tags: [auth]
+      summary: Revoke one of your sessions
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users:
+    get:
+      tags: [users]
+      summary: List users (admin)
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [users]
+      summary: Create a user with a temporary password (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                displayName: { type: string, maxLength: 100 }
+                role: { type: string, enum: [admin, analyst, viewer] }
+                locale: { type: string, enum: [en, ko] }
+                password: { type: string, minLength: 12, maxLength: 72 }
+      responses:
+        "201": { description: User created }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}:
+    patch:
+      tags: [users]
+      summary: Update user role, locale, display name, or disabled state (admin)
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName: { type: string, maxLength: 100 }
+                role: { type: string, enum: [admin, analyst, viewer] }
+                locale: { type: string, enum: [en, ko] }
+                disabled: { type: boolean }
+      responses:
+        "200": { description: Updated }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}/reset-password:
+    post:
+      tags: [users]
+      summary: Set a temporary password and revoke all sessions (admin)
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newPassword]
+              properties:
+                newPassword: { type: string, minLength: 12, maxLength: 72 }
+      responses:
+        "204": { description: Password reset }
+  /projects:
+    get:
+      tags: [projects]
+      summary: List active projects
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Projects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectList"
+    post:
+      tags: [projects]
+      summary: Create a project (analyst/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 120 }
+                description: { type: string, maxLength: 4000 }
+      responses:
+        "201": { description: Created }
+        "422": { $ref: "#/components/responses/Validation" }
+  /projects/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [projects]
+      summary: Get a project
+      responses:
+        "200":
+          description: Project
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [projects]
+      summary: Update a project
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 120 }
+                description: { type: string, maxLength: 4000 }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [projects]
+      summary: Archive a project (admin)
+      responses:
+        "204": { description: Archived }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{id}/conversations:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [conversations]
+      summary: List conversations
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Conversations }
+    post:
+      tags: [conversations]
+      summary: Create a conversation
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 200 }
+      responses:
+        "201": { description: Created }
+  /conversations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [conversations]
+      summary: Get a conversation
+      responses:
+        "200": { description: Conversation }
+    patch:
+      tags: [conversations]
+      summary: Rename a conversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 200 }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [conversations]
+      summary: Delete a conversation and its messages
+      responses:
+        "204": { description: Deleted }
+  /conversations/{id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [conversations]
+      summary: List messages
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Messages }
+    post:
+      tags: [conversations]
+      summary: Append a user message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, maxLength: 20000 }
+      responses:
+        "201": { description: Message created }
+  /conversations/{id}/plan:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [conversations]
+      summary: Ask the configured LLM for a bounded plan (max 3 tasks)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                providerId: { type: string }
+      responses:
+        "201":
+          description: Plan created; active tasks are awaiting approval
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Task" }
+                  message: { $ref: "#/components/schemas/Message" }
+                  provider:
+                    type: object
+                    properties:
+                      name: { type: string }
+                      model: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Validation" }
+        "502": { $ref: "#/components/responses/Upstream" }
+  /projects/{id}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [tasks]
+      summary: List tasks
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Tasks }
+    post:
+      tags: [tasks]
+      summary: Create a task; active tools are approval-gated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, tool]
+              properties:
+                title: { type: string, maxLength: 200 }
+                description: { type: string, maxLength: 2000 }
+                tool: { type: string, enum: [inventory_summary, synthesize_findings, http_head] }
+                parameters: { type: object }
+                conversationId: { type: string }
+      responses:
+        "201": { description: Created }
+        "422": { $ref: "#/components/responses/Validation" }
+  /tasks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [tasks]
+      summary: Get a task
+      responses:
+        "200": { description: Task }
+    patch:
+      tags: [tasks]
+      summary: Edit a queued/pending task; active parameters are immutable
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 200 }
+                description: { type: string, maxLength: 2000 }
+                parameters: { type: object }
+      responses:
+        "200": { description: Updated }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [tasks]
+      summary: Delete a non-running task record (admin)
+      responses:
+        "204": { description: Deleted }
+  /tasks/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [tasks]
+      summary: Cancel a queued, blocked, or awaiting-approval task
+      responses:
+        "200": { description: Cancelled }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /projects/{id}/approvals:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [approvals]
+      summary: List approval records
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [pending, approved, denied, expired] }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Approvals }
+  /approvals/{id}/decide:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [approvals]
+      summary: Approve or deny a pending active task
+      description: Analysts cannot approve their own request; admins can. Denials require a reason.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approve, deny] }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        "200": { description: Decision recorded }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /projects/{id}/findings:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [findings]
+      summary: List findings
+      parameters:
+        - in: query
+          name: severity
+          schema: { type: string, enum: [info, low, medium, high, critical] }
+        - in: query
+          name: status
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Findings }
+    post:
+      tags: [findings]
+      summary: Create a manual finding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 200 }
+                description: { type: string, maxLength: 8000 }
+                severity: { type: string, enum: [info, low, medium, high, critical] }
+                status: { type: string, enum: [open, triaged, accepted, fixed, false_positive] }
+                assetId: { type: string }
+                taskId: { type: string }
+                evidence: { type: object }
+      responses:
+        "201": { description: Created }
+  /findings/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [findings]
+      summary: Get a finding
+      responses:
+        "200": { description: Finding }
+    patch:
+      tags: [findings]
+      summary: Update a finding
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [findings]
+      summary: Delete a finding
+      responses:
+        "204": { description: Deleted }
+  /projects/{id}/assets:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [assets]
+      summary: List declared assets
+      parameters:
+        - in: query
+          name: kind
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Assets }
+    post:
+      tags: [assets]
+      summary: Add one declared asset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, value]
+              properties:
+                kind: { type: string, enum: [host, domain, ip, cidr, url, repo, other] }
+                value: { type: string }
+                source: { type: string }
+                attributes: { type: object }
+      responses:
+        "200": { description: Existing asset refreshed }
+        "201": { description: Asset inserted }
+  /projects/{id}/assets/import:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [assets]
+      summary: Synchronously import an asset list
+      description: Remote URL imports are blocked in safe local-only mode. File imports are confined to LIP_IMPORT_ROOT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, enum: [inline, file, url] }
+                values:
+                  type: array
+                  items: { type: string }
+                path: { type: string }
+                url: { type: string, format: uri }
+      responses:
+        "200":
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inserted: { type: integer }
+                  updated: { type: integer }
+                  skipped: { type: integer }
+                  total: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /assets/{id}:
+    delete:
+      tags: [assets]
+      summary: Delete a declared asset
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204": { description: Deleted }
+  /llm-providers:
+    get:
+      tags: [llm]
+      summary: List LLM providers (admin)
+      responses:
+        "200": { description: Providers }
+    post:
+      tags: [llm]
+      summary: Create an LLM provider (admin)
+      description: Safe local-only mode blocks cloud providers; all network providers must be allowlisted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LLMProviderInput"
+      responses:
+        "201": { description: Created }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /llm-providers/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    patch:
+      tags: [llm]
+      summary: Update an LLM provider (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LLMProviderInput"
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [llm]
+      summary: Delete a non-default provider (admin)
+      responses:
+        "204": { description: Deleted }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /llm-providers/{id}/test:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [llm]
+      summary: Ping a provider (admin); the result is audited
+      responses:
+        "200": { description: Reachable }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/Upstream" }
+  /settings:
+    get:
+      tags: [settings]
+      summary: List editable instance settings (admin)
+      responses:
+        "200": { description: Settings }
+    patch:
+      tags: [settings]
+      summary: Update instance settings (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [key, value]
+                    properties:
+                      key:
+                        type: string
+                        enum:
+                          - app.name
+                          - "i18n.default\u005Flocale"
+                          - report.disclaimer
+                      value: {}
+      responses:
+        "200": { description: Updated settings }
+        "422": { $ref: "#/components/responses/Validation" }
+  /audit:
+    get:
+      tags: [audit]
+      summary: List audit entries (admin)
+      parameters:
+        - in: query
+          name: actorId
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: result
+          schema: { type: string, enum: [success, failure, denied] }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200": { description: Audit entries }
+  /dashboard:
+    get:
+      tags: [dashboard]
+      summary: Aggregate dashboard counts and recent items
+      responses:
+        "200": { description: Dashboard }
+  /meta/tools:
+    get:
+      tags: [tasks]
+      summary: List the bounded tool catalog
+      responses:
+        "200":
+          description: Tools
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ToolDefinition" }
+  /projects/{id}/report:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [reports]
+      summary: Download a deterministic Markdown report
+      responses:
+        "200":
+          description: Markdown attachment
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            text/markdown:
+              schema: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /i18n/{locale}:
+    get:
+      tags: [system]
+      security: []
+      summary: Return the UI string bundle
+      parameters:
+        - in: path
+          name: locale
+          required: true
+          schema: { type: string, enum: [en, ko] }
+      responses:
+        "200":
+          description: Locale strings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  locale: { type: string }
+                  strings:
+                    type: object
+                    additionalProperties: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: lip_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    Id:
+      in: path
+      name: id
+      required: true
+      schema: { type: string }
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Offset:
+      in: query
+      name: offset
+      schema: { type: integer, minimum: 0, default: 0 }
+  responses:
+    Unauthorized:
+      description: Authentication required or session expired
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Role, origin, safe-mode, or self-approval denial
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Current state conflicts with the request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Validation:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many attempts; see Retry-After
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Upstream:
+      description: Model provider or remote import failure
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: Database unavailable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthorized
+                - forbidden
+                - not_found
+                - conflict
+                - validation_failed
+                - rate_limited
+                - safe_mode_denied
+                - egress_denied
+                - no_provider
+                - provider_error
+                - internal
+                - setup_closed
+                - weak_password
+                - invalid_credentials
+                - last_admin
+                - password_change_required
+                - payload_too_large
+                - unsupported_media_type
+                - network
+            message: { type: string }
+            details: {}
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { type: string, enum: [admin, analyst, viewer] }
+        locale: { type: string, enum: [en, ko] }
+        mustChangePassword: { type: boolean }
+        disabledAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Session:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        ip: { type: string }
+        userAgent: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        revokedAt: { type: [string, "null"], format: date-time }
+    Project:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        createdBy: { type: string }
+        archivedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProjectList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Project" }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    Conversation:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        title: { type: string }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Message:
+      type: object
+      properties:
+        id: { type: string }
+        conversationId: { type: string }
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content: { type: string }
+        metadata: { type: object }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+    Task:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        conversationId: { type: [string, "null"] }
+        title: { type: string }
+        description: { type: string }
+        tool: { type: string }
+        parameters: { type: object }
+        riskLevel: { type: string, enum: [passive, active, destructive] }
+        status:
+          type: string
+          enum: [queued, awaiting_approval, running, succeeded, failed, cancelled, blocked]
+        attempts: { type: integer }
+        lastError: { type: string }
+        result: { type: object }
+        createdBy: { type: string }
+        approvedBy: { type: [string, "null"] }
+        startedAt: { type: [string, "null"], format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Finding:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        taskId: { type: [string, "null"] }
+        assetId: { type: [string, "null"] }
+        title: { type: string }
+        description: { type: string }
+        severity: { type: string, enum: [info, low, medium, high, critical] }
+        status: { type: string, enum: [open, triaged, accepted, fixed, false_positive] }
+        source: { type: string, enum: [manual, llm, import] }
+        evidence: { type: object }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Asset:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        kind: { type: string, enum: [host, domain, ip, cidr, url, repo, other] }
+        value: { type: string }
+        source: { type: string }
+        attributes: { type: object }
+        firstSeen: { type: string, format: date-time }
+        lastSeen: { type: string, format: date-time }
+        createdBy: { type: string }
+    Approval:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        taskId: { type: string }
+        action: { type: string }
+        reason: { type: string }
+        status: { type: string, enum: [pending, approved, denied, expired] }
+        requestedBy: { type: string }
+        decidedBy: { type: string }
+        expiresAt: { type: string, format: date-time }
+        decidedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+    LLMProvider:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [ollama, openai] }
+        baseUrl: { type: string }
+        model: { type: string }
+        apiKeyEnv: { type: string }
+        enabled: { type: boolean }
+        isDefault: { type: boolean }
+        config: { type: object }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    LLMProviderInput:
+      type: object
+      required: [name, kind, model]
+      properties:
+        name: { type: string, maxLength: 80 }
+        kind: { type: string, enum: [ollama, openai] }
+        baseUrl: { type: string, format: uri }
+        model: { type: string, maxLength: 120 }
+        apiKeyEnv: { type: string, pattern: "^LIP_LLM_[A-Z0-9_]+$" }
+        enabled: { type: boolean }
+        isDefault: { type: boolean }
+        config: { type: object }
+    Setting:
+      type: object
+      properties:
+        key: { type: string }
+        value: {}
+        updatedBy: { type: string }
+        updatedAt: { type: string, format: date-time }
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        actorId: { type: string }
+        actorEmail: { type: string }
+        action: { type: string }
+        targetType: { type: string }
+        targetId: { type: string }
+        result: { type: string, enum: [success, failure, denied] }
+        ip: { type: string }
+        metadata: { type: object }
+        createdAt: { type: string, format: date-time }
+    ToolDefinition:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        risk: { type: string, enum: [passive, active, destructive] }
+        requiresApproval: { type: boolean }
+        parameterHint: { type: string }

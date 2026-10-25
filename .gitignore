@@ -1,0 +1,15 @@
+# Build artifacts and local state
+.env
+.env.*
+!.env.example
+bin/
+data/imports/*
+!data/imports/.gitkeep
+web/node_modules/
+web/.next/
+web/out/
+web/src/i18n/locales/
+*.log
+.DS_Store
+
+*.tsbuildinfo

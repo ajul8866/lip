@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!/.env.example
+bin
+data/imports
+web/node_modules
+web/.next
+web/out
+web/src/i18n/locales
+internal/webui/dist
+*.log
+README.md
+docs
+LICENSE

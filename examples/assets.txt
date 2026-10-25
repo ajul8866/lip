@@ -1,0 +1,5 @@
+# LIP demo asset list. Replace with authorized, owned targets only.
+domain example.com
+url https://example.com
+ip 192.0.2.10
+cidr 192.0.2.0/24
